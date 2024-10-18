@@ -344,7 +344,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::{cell::RefCell, sync::atomic::{AtomicBool, Ordering}, task::Waker};
     #[cfg(feature = "futures")]
     use std::time::Duration;
 
@@ -355,8 +355,7 @@ mod test {
         Result,
     };
     use crate::{
-        function::Func, prelude::This, promise::PromiseState, CatchResultExt, Context, Function,
-        Runtime,
+        function::Func, prelude::This, promise::PromiseState, CatchResultExt, Context, Error, Function, Runtime
     };
 
     #[cfg(feature = "futures")]
@@ -503,4 +502,45 @@ mod test {
             assert!(DID_EXECUTE.load(Ordering::SeqCst));
         })
     }
+
+    #[tokio::test]
+    async fn test_promise_bound() {
+        let rt = AsyncRuntime::new().unwrap();
+        let ctx = AsyncContext::full(&rt).await.unwrap();
+        ctx.async_with(|ctx|{
+            {
+                let (_promise, _resolve, _) = Promise::new(&ctx).unwrap();
+                // Promise contains pointer into quickjs and Promise is clone, quicks is not Sync,so Promise is not send
+                // flowing code will not compile
+                // check_send_ref(&_promise);
+            }
+
+            let promised = Promised::from(async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                42
+            });
+            let function = ctx.eval::<Function,_>(r"
+                (async function(v){
+                    let val = await v;
+                    if(val !== 42){
+                        throw new Error('not correct value')
+                    }
+                })
+            ").catch(&ctx).unwrap();
+            // Promise is not Send , so PromiseFuture is not Send 
+            let _fut = function.call::<_,Promise>((promised,)).unwrap().into_future::<()>();
+            Box::pin(async move {
+                Ok::<_,Error>(())
+            })
+        });
+
+    }
+
+    #[test]
+    fn test_refcell_send() {
+        _check_send::<RefCell<Waker>>();
+    }
+    fn _check_send_ref<T>(_val: &T) where T:Send{}
+    fn _check_send<T>() where T:Send{}
+
 }
