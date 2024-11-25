@@ -14,7 +14,7 @@ mod params;
 mod types;
 
 pub use args::{Args, IntoArg, IntoArgs};
-pub use ffi::{RustFunction, StaticJsFn};
+pub use ffi::RustFunction;
 pub use params::{FromParam, FromParams, ParamRequirement, Params, ParamsAccessor};
 #[cfg(feature = "futures")]
 pub use types::Async;
@@ -151,7 +151,7 @@ impl<'js> Function<'js> {
     /// `Function.prototype`.
     pub fn prototype(ctx: Ctx<'js>) -> Object<'js> {
         let res = unsafe {
-            let v = qjs::JS_DupValue(qjs::JS_GetFunctionProto(ctx.as_ptr()));
+            let v = qjs::JS_GetFunctionProto(ctx.as_ptr());
             Value::from_js_value(ctx, v)
         };
         // as far is I know this should always be an object.
@@ -204,10 +204,12 @@ impl<'js> Constructor<'js> {
             params.check_params(F::param_requirements())?;
             let this = params.this();
             let ctx = params.ctx().clone();
+
+            // get the prototype of thie class from itself or the inate class prototype.
             let proto = this
                 .into_function()
                 .map(|func| func.get(PredefinedAtom::Prototype))
-                .unwrap_or_else(|| Ok(Class::<C>::prototype(ctx.clone())))?;
+                .unwrap_or_else(|| Class::<C>::prototype(&ctx))?;
 
             let res = f.call(params)?;
             res.as_object()
@@ -226,7 +228,7 @@ impl<'js> Constructor<'js> {
             qjs::JS_SetConstructor(
                 ctx.as_ptr(),
                 func.as_js_value(),
-                Class::<C>::prototype(ctx)
+                Class::<C>::prototype(&ctx)?
                     .as_ref()
                     .map(|x| x.as_js_value())
                     .unwrap_or(qjs::JS_NULL),

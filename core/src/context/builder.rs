@@ -2,10 +2,10 @@ use std::{marker::PhantomData, ptr::NonNull};
 
 #[cfg(feature = "futures")]
 use crate::{context::AsyncContext, runtime::AsyncRuntime};
-use crate::{qjs, Context, Result, Runtime};
+use crate::{qjs, util::Sealed, Context, Result, Runtime};
 
 /// The internal trait to add JS builtins
-pub trait Intrinsic {
+pub trait Intrinsic: Sealed {
     /// # Safety
     /// Do not need implement it yourself instead you may use predefined intrinsics from [`intrinsic`] module.
     unsafe fn add_intrinsic(ctx: NonNull<qjs::JSContext>);
@@ -19,6 +19,7 @@ macro_rules! intrinsic_impls {
         $(
             $(#[$meta])*
             pub struct $name;
+            impl crate::util::Sealed for $name { }
 
             impl Intrinsic for $name {
                 unsafe fn add_intrinsic(ctx: NonNull<qjs::JSContext>) {
@@ -30,6 +31,8 @@ macro_rules! intrinsic_impls {
 
     (@tuple: $($($name:ident)*,)*) => {
         $(
+            impl<$($name,)*> crate::util::Sealed for ($($name,)*) { }
+
             impl<$($name,)*> Intrinsic for ($($name,)*)
             where
                 $($name: Intrinsic,)*
@@ -50,14 +53,10 @@ pub mod intrinsic {
 
     intrinsic_impls! {
         @builtin:
-        /// Add base objects support
-        BaseObjects JS_AddIntrinsicBaseObjects,
         /// Add Date object support
         Date JS_AddIntrinsicDate,
         /// Add evaluation support
         Eval JS_AddIntrinsicEval,
-        /// Add string normalization
-        StringNormalize JS_AddIntrinsicStringNormalize,
         /// Add RegExp compiler
         RegExpCompiler JS_AddIntrinsicRegExpCompiler,
         /// Add RegExp object support
@@ -74,18 +73,11 @@ pub mod intrinsic {
         Promise JS_AddIntrinsicPromise,
         /// Add BigInt support
         BigInt JS_AddIntrinsicBigInt,
-        /// Add BigFloat support
-        BigFloat JS_AddIntrinsicBigFloat,
-        /// Add BigDecimal support
-        BigDecimal JS_AddIntrinsicBigDecimal,
-        /// Add operator overloading support
-        Operators JS_AddIntrinsicOperators,
-        /// Enable bignum extension
-        BignumExt JS_EnableBignumExt (1),
+        /// Add Performance support
+        Performance JS_AddPerformance,
+        /// Add WeakRef support
+        WeakRef JS_AddIntrinsicWeakRef,
     }
-
-    /// An alias for [`BaseObjects`]
-    pub type Base = BaseObjects;
 
     /// Add none intrinsics
     pub type None = ();
@@ -94,7 +86,6 @@ pub mod intrinsic {
     pub type All = (
         Date,
         Eval,
-        StringNormalize,
         RegExpCompiler,
         RegExp,
         Json,
@@ -103,10 +94,8 @@ pub mod intrinsic {
         TypedArrays,
         Promise,
         BigInt,
-        BigFloat,
-        BigDecimal,
-        Operators,
-        BignumExt,
+        Performance,
+        WeakRef,
     );
 }
 
@@ -166,25 +155,5 @@ mod tests {
             .unwrap();
         let result: usize = ctx.with(|ctx| ctx.eval("1+1")).unwrap();
         assert_eq!(result, 2);
-    }
-
-    #[test]
-    fn custom_intrinsic() {
-        struct MyIntrinsic;
-
-        impl Intrinsic for MyIntrinsic {
-            unsafe fn add_intrinsic(ctx: NonNull<qjs::JSContext>) {
-                let ctx = crate::Ctx::from_raw(ctx);
-                ctx.globals().set("test", 42).unwrap();
-            }
-        }
-
-        let rt = crate::Runtime::new().unwrap();
-        let ctx = Context::builder()
-            .with::<(MyIntrinsic, intrinsic::Eval)>()
-            .build(&rt)
-            .unwrap();
-        let result: usize = ctx.with(|ctx| ctx.eval("test+1")).unwrap();
-        assert_eq!(result, 43);
     }
 }

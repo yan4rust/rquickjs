@@ -1,6 +1,7 @@
 #[cfg(feature = "futures")]
 use std::future::Future;
 use std::{
+    any::Any,
     ffi::{CStr, CString},
     fs,
     mem::{self, MaybeUninit},
@@ -12,11 +13,10 @@ use std::{
 #[cfg(feature = "futures")]
 use crate::AsyncContext;
 use crate::{
-    cstr,
     markers::Invariant,
     qjs,
-    runtime::{opaque::Opaque, UserData, UserDataError, UserDataGuard},
-    Atom, Error, FromJs, Function, IntoJs, Object, Promise, Result, String, Value,
+    runtime::{opaque::Opaque, UserDataError, UserDataGuard},
+    Atom, Error, FromJs, Function, IntoJs, JsLifetime, Object, Promise, Result, String, Value,
 };
 
 use super::Context;
@@ -94,6 +94,11 @@ impl<'js> Drop for Ctx<'js> {
 
 unsafe impl Send for Ctx<'_> {}
 
+#[repr(C)] // Ensure C-compatible memory layout
+pub(crate) struct RefCountHeader {
+    pub ref_count: i32, // `int` in C is usually equivalent to `i32` in Rust
+}
+
 impl<'js> Ctx<'js> {
     pub(crate) fn as_ptr(&self) -> *mut qjs::JSContext {
         self.ctx.as_ptr()
@@ -169,7 +174,7 @@ impl<'js> Ctx<'js> {
         source: S,
         options: EvalOptions,
     ) -> Result<V> {
-        let file_name = cstr!("eval_script");
+        let file_name = CStr::from_bytes_with_nul(b"eval_script\0").unwrap();
 
         V::from_js(self, unsafe {
             let val = self.eval_raw(source, file_name, options.to_flag())?;
@@ -247,34 +252,16 @@ impl<'js> Ctx<'js> {
     where
         S: Into<Vec<u8>>,
     {
-        self.json_parse_ext(json, false)
-    }
-
-    /// Parse json into a JavaScript value, possibly allowing extended syntax support.
-    ///
-    /// If `allow_extensions` is `true`, this function will allow extended json syntax.
-    /// Extended syntax allows comments, single quoted strings, non string property names, trailing
-    /// comma's and hex, oct and binary numbers.
-    pub fn json_parse_ext<S>(&self, json: S, allow_extensions: bool) -> Result<Value<'js>>
-    where
-        S: Into<Vec<u8>>,
-    {
         let src = json.into();
         let len = src.len();
         let src = CString::new(src)?;
         unsafe {
-            let flag = if allow_extensions {
-                qjs::JS_PARSE_JSON_EXT as i32
-            } else {
-                0i32
-            };
             let name = b"<input>\0";
-            let v = qjs::JS_ParseJSON2(
+            let v = qjs::JS_ParseJSON(
                 self.as_ptr(),
                 src.as_ptr().cast(),
                 len.try_into().expect(qjs::SIZE_T_ERROR),
                 name.as_ptr().cast(),
-                flag,
             );
             self.handle_exception(v)?;
             Ok(Value::from_js_value(self.clone(), v))
@@ -393,8 +380,7 @@ impl<'js> Ctx<'js> {
     }
 
     pub(crate) unsafe fn get_opaque(&self) -> &Opaque<'js> {
-        let rt = qjs::JS_GetRuntime(self.ctx.as_ptr());
-        &(*qjs::JS_GetRuntimeOpaque(rt).cast::<Opaque>())
+        Opaque::from_runtime_ptr(qjs::JS_GetRuntime(self.ctx.as_ptr()))
     }
 
     /// Spawn future using configured async runtime
@@ -461,10 +447,11 @@ impl<'js> Ctx<'js> {
     /// Returns the value from the argument if the userdata is currently being accessed and
     /// insertion is not possible.
     /// Otherwise returns the exising value for this type if it existed.
-    pub fn store_userdata<U: UserData<'js>>(
-        &self,
-        data: U,
-    ) -> StdResult<Option<Box<U>>, UserDataError<U>> {
+    pub fn store_userdata<U>(&self, data: U) -> StdResult<Option<Box<U>>, UserDataError<U>>
+    where
+        U: JsLifetime<'js>,
+        U::Changed<'static>: Any,
+    {
         unsafe { self.get_opaque().insert_userdata(data) }
     }
 
@@ -472,16 +459,22 @@ impl<'js> Ctx<'js> {
     ///
     /// Returns Err(()) if the userdata is currently being accessed and removing isn't possible.
     /// Returns Ok(None) if userdata of the given type wasn't inserted.
-    pub fn remove_userdata<U: UserData<'js>>(
-        &self,
-    ) -> StdResult<Option<Box<U>>, UserDataError<()>> {
+    pub fn remove_userdata<U>(&self) -> StdResult<Option<Box<U>>, UserDataError<()>>
+    where
+        U: JsLifetime<'js>,
+        U::Changed<'static>: Any,
+    {
         unsafe { self.get_opaque().remove_userdata() }
     }
 
     /// Retrieves a borrow to the userdata of the given type from the userdata storage.
     ///
     /// Returns None if userdata of the given type wasn't inserted.
-    pub fn userdata<U: UserData<'js>>(&self) -> Option<UserDataGuard<U>> {
+    pub fn userdata<U>(&self) -> Option<UserDataGuard<U>>
+    where
+        U: JsLifetime<'js>,
+        U::Changed<'static>: Any,
+    {
         unsafe { self.get_opaque().get_userdata() }
     }
 
@@ -493,7 +486,7 @@ impl<'js> Ctx<'js> {
 
 #[cfg(test)]
 mod test {
-    use crate::CatchResultExt;
+    use crate::{CatchResultExt, JsLifetime};
 
     #[test]
     fn exports() {
@@ -549,7 +542,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "'foo' is not defined")]
+    #[should_panic(expected = "foo is not defined")]
     fn eval_with_sloppy_code() {
         use crate::{CatchResultExt, Context, Runtime};
 
@@ -601,7 +594,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "'foo' is not defined")]
+    #[should_panic(expected = "foo is not defined")]
     fn eval_with_options_strict_sloppy_code() {
         use crate::{context::EvalOptions, CatchResultExt, Context, Runtime};
 
@@ -649,29 +642,6 @@ mod test {
     }
 
     #[test]
-    fn json_parse_extension() {
-        use crate::{Array, Context, Object, Runtime};
-
-        let runtime = Runtime::new().unwrap();
-        let ctx = Context::full(&runtime).unwrap();
-        ctx.with(|ctx| {
-            let v = ctx
-                .json_parse_ext(
-                    r#"{ a: { "b": 0xf, "c": 0b11 }, "d": [0o17,'foo'], }"#,
-                    true,
-                )
-                .unwrap();
-            let obj = v.into_object().unwrap();
-            let inner_obj: Object = obj.get("a").unwrap();
-            assert_eq!(inner_obj.get::<_, i32>("b").unwrap(), 0xf);
-            assert_eq!(inner_obj.get::<_, i32>("c").unwrap(), 0b11);
-            let inner_array: Array = obj.get("d").unwrap();
-            assert_eq!(inner_array.get::<i32>(0).unwrap(), 0o17);
-            assert_eq!(inner_array.get::<String>(1).unwrap(), "foo".to_string());
-        })
-    }
-
-    #[test]
     fn json_stringify() {
         use crate::{Array, Context, Object, Runtime};
 
@@ -703,14 +673,14 @@ mod test {
 
     #[test]
     fn userdata() {
-        use crate::{runtime::UserData, Context, Function, Runtime};
+        use crate::{Context, Function, Runtime};
 
         pub struct MyUserData<'js> {
             base: Function<'js>,
         }
 
-        unsafe impl<'js> UserData<'js> for MyUserData<'js> {
-            type Static = MyUserData<'static>;
+        unsafe impl<'js> JsLifetime<'js> for MyUserData<'js> {
+            type Changed<'to> = MyUserData<'to>;
         }
 
         let rt = Runtime::new().unwrap();

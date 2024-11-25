@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    atom::PredefinedAtom, qjs, Atom, Context, Ctx, Error, FromAtom, FromJs, IntoAtom, IntoJs,
-    Object, Promise, Result, Value,
+    atom::PredefinedAtom, qjs, Atom, Ctx, Error, FromAtom, FromJs, IntoAtom, IntoJs, Object,
+    Promise, Result, Value,
 };
 
 /// Helper macro to provide module init function.
@@ -301,7 +301,7 @@ impl<'js> Module<'js, Declared> {
         let ret = unsafe {
             // JS_EvalFunction `free's` the module so we should dup first
             let v = qjs::JS_MKPTR(qjs::JS_TAG_MODULE, self.ptr.as_ptr().cast());
-            qjs::JS_DupValue(v);
+            qjs::JS_DupValue(self.ctx.as_ptr(), v);
             qjs::JS_EvalFunction(self.ctx.as_ptr(), v)
         };
         let ret = unsafe { self.ctx.handle_exception(ret)? };
@@ -328,7 +328,6 @@ impl<'js> Module<'js, Declared> {
     where
         D: ModuleDef,
     {
-        Context::init_raw(ctx);
         let ctx = Ctx::from_ptr(ctx);
         let name = CStr::from_ptr(name).to_bytes();
         match Self::declare_def::<D, _>(ctx.clone(), name) {

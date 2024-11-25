@@ -1,5 +1,5 @@
-use super::{intrinsic, r#ref::ContextRef, ContextBuilder, Intrinsic};
-use crate::{class::Class, function::RustFunction, qjs, Ctx, Error, Result, Runtime};
+use super::{ctx::RefCountHeader, intrinsic, r#ref::ContextRef, ContextBuilder, Intrinsic};
+use crate::{qjs, Ctx, Error, Result, Runtime};
 use std::{mem, ptr::NonNull};
 
 pub(crate) struct Inner {
@@ -40,7 +40,7 @@ impl Context {
     /// If additional functions are required use [`Context::custom`],
     /// [`Context::builder`] or [`Context::full`].
     pub fn base(runtime: &Runtime) -> Result<Self> {
-        Self::custom::<intrinsic::Base>(runtime)
+        Self::custom::<intrinsic::None>(runtime)
     }
 
     /// Creates a context with only the required intrinsics registered.
@@ -51,9 +51,8 @@ impl Context {
         let ctx = NonNull::new(unsafe { qjs::JS_NewContextRaw(guard.rt.as_ptr()) })
             .ok_or_else(|| Error::Allocation)?;
         // rquickjs assumes the base objects exist, so we allways need to add this.
-        unsafe { intrinsic::Base::add_intrinsic(ctx) };
+        unsafe { qjs::JS_AddIntrinsicBaseObjects(ctx.as_ptr()) };
         unsafe { I::add_intrinsic(ctx) };
-        unsafe { Self::init_raw(ctx.as_ptr()) }
         let res = Inner {
             ctx,
             rt: runtime.clone(),
@@ -70,7 +69,6 @@ impl Context {
         let guard = runtime.inner.lock();
         let ctx = NonNull::new(unsafe { qjs::JS_NewContext(guard.rt.as_ptr()) })
             .ok_or_else(|| Error::Allocation)?;
-        unsafe { Self::init_raw(ctx.as_ptr()) }
         let res = Inner {
             ctx,
             rt: runtime.clone(),
@@ -84,14 +82,6 @@ impl Context {
     /// Create a context builder for creating a context with a specific set of intrinsics
     pub fn builder() -> ContextBuilder<()> {
         ContextBuilder::default()
-    }
-
-    pub fn enable_big_num_ext(&self, enable: bool) {
-        let guard = self.0.rt.inner.lock();
-        guard.update_stack_top();
-        unsafe { qjs::JS_EnableBignumExt(self.0.ctx.as_ptr(), i32::from(enable)) }
-        // Explicitly drop the guard to ensure it is valid during the entire use of runtime
-        mem::drop(guard)
     }
 
     /// Returns the associated runtime
@@ -121,11 +111,6 @@ impl Context {
         let ctx = unsafe { Ctx::new(self) };
         f(ctx)
     }
-
-    pub(crate) unsafe fn init_raw(ctx: *mut qjs::JSContext) {
-        Class::<RustFunction>::register(&Ctx::from_ptr(ctx))
-            .expect("failed to initialized callback class");
-    }
 }
 
 impl Drop for Context {
@@ -134,7 +119,7 @@ impl Drop for Context {
         let guard = match self.0.rt.inner.try_lock() {
             Some(x) => x,
             None => {
-                let p = unsafe { &mut *(self.0.ctx.as_ptr() as *mut qjs::JSRefCountHeader) };
+                let p = unsafe { &mut *(self.0.ctx.as_ptr() as *mut RefCountHeader) };
                 if p.ref_count <= 1 {
                     // Lock was poisoned, this should only happen on a panic.
                     // We should still free the context.
@@ -169,7 +154,7 @@ mod test {
     use crate::*;
 
     #[test]
-    fn base() {
+    fn basic() {
         test_with(|ctx| {
             let val: Value = ctx.eval(r#"1+1"#).unwrap();
 
@@ -192,6 +177,12 @@ mod test {
             assert_eq!(val, 2);
             println!("{:?}", ctx.globals());
         });
+    }
+
+    #[test]
+    fn base() {
+        let rt = Runtime::new().unwrap();
+        let _ = Context::base(&rt).unwrap();
     }
 
     #[test]
@@ -260,9 +251,10 @@ mod test {
         println!("done");
     }
 
+    // Will be improved by https://github.com/quickjs-ng/quickjs/pull/406
     #[test]
     #[should_panic(
-        expected = "Error:[eval_script]:1:4 invalid first character of private name\n    at eval_script:1:4\n"
+        expected = "Error: invalid first character of private name\n    at eval_script:1:1\n"
     )]
     fn exception() {
         test_with(|ctx| {

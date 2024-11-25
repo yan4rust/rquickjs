@@ -67,7 +67,7 @@ impl<'js> Hash for Value<'js> {
 impl<'js> Clone for Value<'js> {
     fn clone(&self) -> Self {
         let ctx = self.ctx.clone();
-        let value = unsafe { qjs::JS_DupValue(self.value) };
+        let value = unsafe { qjs::JS_DupValue(ctx.as_ptr(), self.value) };
         Self { ctx, value }
     }
 }
@@ -131,7 +131,7 @@ impl<'js> Value<'js> {
 
     #[inline]
     pub(crate) unsafe fn from_js_value_const(ctx: Ctx<'js>, value: qjs::JSValueConst) -> Self {
-        let value = qjs::JS_DupValue(value);
+        let value = qjs::JS_DupValue(ctx.as_ptr(), value);
         Self { ctx, value }
     }
 
@@ -271,7 +271,7 @@ impl<'js> Value<'js> {
     #[allow(unused)]
     #[inline]
     pub(crate) fn new_ptr_const(ctx: Ctx<'js>, tag: qjs::c_int, ptr: *mut qjs::c_void) -> Self {
-        let value = unsafe { qjs::JS_DupValue(qjs::JS_MKPTR(tag, ptr)) };
+        let value = unsafe { qjs::JS_DupValue(ctx.as_ptr(), qjs::JS_MKPTR(tag, ptr)) };
         Self { ctx, value }
     }
 
@@ -570,14 +570,14 @@ macro_rules! sub_types {
                 #[allow(unused)]
                 pub(crate) unsafe fn from_js_value_const(ctx: Ctx<'js>, value: qjs::JSValueConst) -> Self {
                     let v = Value::from_js_value_const(ctx, value);
-                    debug_assert!(v.$as().is_some(),"tried to cource js value {:?} to the wrong type, this is a rquickjs bug",v);
+                    debug_assert!(v.$as().is_some(),"tried to cource js value {:?} to the wrong type `{}`, this is a rquickjs bug",v, stringify!($head));
                     sub_types!(@wrap $head$(->$sub_type)*  v)
                 }
 
                 #[allow(unused)]
                 pub(crate) unsafe fn from_js_value(ctx: Ctx<'js>, value: qjs::JSValue) -> Self {
                     let v = Value::from_js_value(ctx, value);
-                    debug_assert!(v.$as().is_some(),"tried to cource js value {:?} to the wrong type, this is a rquickjs bug",v);
+                    debug_assert!(v.$as().is_some(),"tried to cource js value {:?} to the wrong type `{}`, this is a rquickjs bug",v, stringify!($head));
                     sub_types!(@wrap $head$(->$sub_type)*  v)
                 }
 
